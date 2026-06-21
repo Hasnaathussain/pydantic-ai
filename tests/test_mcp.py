@@ -31,6 +31,7 @@ from pydantic_ai import (
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai._utils import BaseExceptionGroup
 from pydantic_ai.agent import Agent, AgentRunResult
 from pydantic_ai.exceptions import (
     ModelRetry,
@@ -2107,6 +2108,42 @@ async def test_mcp_server_raises_mcp_error(
             new=AsyncMock(side_effect=mcp_error),
         ):
             with pytest.raises(ModelRetry, match='Test MCP error conversion'):
+                await mcp_server.direct_call_tool('test_tool', {})
+
+
+async def test_mcp_server_unwraps_exception_group_mcp_error(
+    allow_model_requests: None, mcp_server: MCPServerStdio, agent: Agent, run_context: RunContext[int]
+) -> None:
+    """An `McpError` wrapped in an `ExceptionGroup` (as the MCP client's anyio task group can
+    surface it) is still converted to a recoverable `ModelRetry`, not a fatal crash."""
+    mcp_error = McpError(error=ErrorData(code=400, message='Wrapped MCP error conversion'))
+    wrapped = BaseExceptionGroup('unhandled errors in a TaskGroup', [mcp_error])
+
+    async with agent:
+        with patch.object(
+            mcp_server._get_client(),  # pyright: ignore[reportPrivateUsage]
+            'send_request',
+            new=AsyncMock(side_effect=wrapped),
+        ):
+            with pytest.raises(ModelRetry, match='Wrapped MCP error conversion'):
+                await mcp_server.direct_call_tool('test_tool', {})
+
+
+async def test_mcp_server_reraises_mixed_exception_group(
+    allow_model_requests: None, mcp_server: MCPServerStdio, agent: Agent, run_context: RunContext[int]
+) -> None:
+    """A group that also contains a non-`McpError` is re-raised as-is, so we never swallow
+    e.g. a concurrent cancellation alongside the tool error."""
+    mcp_error = McpError(error=ErrorData(code=400, message='Tool error'))
+    wrapped = BaseExceptionGroup('mixed', [mcp_error, ValueError('boom')])
+
+    async with agent:
+        with patch.object(
+            mcp_server._get_client(),  # pyright: ignore[reportPrivateUsage]
+            'send_request',
+            new=AsyncMock(side_effect=wrapped),
+        ):
+            with pytest.raises(BaseExceptionGroup):
                 await mcp_server.direct_call_tool('test_tool', {})
 
 
