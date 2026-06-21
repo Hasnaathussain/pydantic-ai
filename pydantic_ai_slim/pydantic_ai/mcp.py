@@ -13,7 +13,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeAlias, cast, overload
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeAlias, overload
 
 import anyio
 import httpx
@@ -177,22 +177,6 @@ class MCPError(RuntimeError):
         if self.data:
             return f'{self.message} (code: {self.code}, data: {self.data})'
         return f'{self.message} (code: {self.code})'
-
-
-def _first_mcp_error(exc: BaseException) -> mcp_exceptions.McpError | None:
-    """Return the first `McpError` nested anywhere in `exc`, unwrapping `ExceptionGroup`s.
-
-    The MCP client session runs in an anyio task group, so an error response can
-    surface wrapped in an `ExceptionGroup` rather than as a bare `McpError`.
-    """
-    if isinstance(exc, mcp_exceptions.McpError):
-        return exc
-    if isinstance(exc, _utils.BaseExceptionGroup):
-        group = cast('_utils.BaseExceptionGroup[BaseException]', exc)
-        for sub in group.exceptions:
-            if (found := _first_mcp_error(sub)) is not None:
-                return found
-    return None
 
 
 @dataclass(repr=False, kw_only=True)
@@ -1084,10 +1068,13 @@ class MCPServer(AbstractToolset[Any], ABC):
                 # the bare case above) when the group contains only `McpError`s;
                 # otherwise re-raise so we never swallow e.g. a concurrent cancellation.
                 matched, rest = eg.split(mcp_exceptions.McpError)
-                mcp_error = _first_mcp_error(matched) if matched is not None else None
-                if rest is not None or mcp_error is None:
+                if matched is None or rest is not None:
                     raise
-                raise exceptions.ModelRetry(mcp_error.error.message) from eg
+                # `matched` holds only `McpError`s; descend through any nesting to a leaf.
+                error: mcp_exceptions.McpError | _utils.BaseExceptionGroup[mcp_exceptions.McpError] = matched
+                while isinstance(error, _utils.BaseExceptionGroup):
+                    error = error.exceptions[0]
+                raise exceptions.ModelRetry(error.error.message) from eg
 
         if result.isError:
             message: str | None = None
